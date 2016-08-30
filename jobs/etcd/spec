@@ -63,3 +63,6 @@ properties:
 
   etcd.advertise_urls_dns_suffix:
     description: "DNS suffix for all nodes in the etcd cluster"
+
+  diego.zone:
+    description: "Site (datacenter name), used for node name uniqness"

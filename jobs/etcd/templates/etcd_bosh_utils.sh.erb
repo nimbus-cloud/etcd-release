@@ -4,7 +4,7 @@ LOG_DIR=/var/vcap/sys/log/etcd
 STORE_DIR=/var/vcap/store
 DATA_DIR=${STORE_DIR}/etcd
 
-node_name="<%= name.gsub('_', '-') %>-<%= spec.index %>"
+node_name="<%= name.gsub('_', '-') %>-<%= p("diego.zone") %>-<%= spec.index %>"
 <%
   def discover_external_ip
     networks = spec.networks.marshal_dump
@@ -31,7 +31,7 @@ node_name="<%= name.gsub('_', '-') %>-<%= spec.index %>"
     cluster_members = p("etcd.cluster").map do |zone|
       result = []
       for i in 0..zone["instances"]-1
-        result << "#{client_protocol}://#{zone["name"].gsub('_', '-')}-#{i}.#{p("etcd.advertise_urls_dns_suffix")}:4001"
+        result << "#{client_protocol}://#{zone["name"].gsub('_', '-')}-#{p("diego.zone")}-#{i}.#{p("etcd.advertise_urls_dns_suffix")}:4001"
       end
       result
     end.flatten.join(",")
