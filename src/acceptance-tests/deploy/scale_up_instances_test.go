@@ -1,116 +1,90 @@
 package deploy_test
 
 import (
-	"acceptance-tests/testing/helpers"
 	"fmt"
-	"sync"
+
+	etcdclient "acceptance-tests/testing/etcd"
+	"acceptance-tests/testing/helpers"
 
 	"github.com/pivotal-cf-experimental/bosh-test/bosh"
-	"github.com/pivotal-cf-experimental/destiny"
+	"github.com/pivotal-cf-experimental/destiny/etcd"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
 
 var _ = Describe("Scaling up instances", func() {
-	var (
-		manifest destiny.Manifest
+	ScaleUpInstances := func(enableSSL bool) {
 
-		testKey   string
-		testValue string
-	)
+		var (
+			manifest   etcd.Manifest
+			etcdClient etcdclient.Client
 
-	BeforeEach(func() {
-		guid, err := helpers.NewGUID()
-		Expect(err).NotTo(HaveOccurred())
+			testKey   string
+			testValue string
+		)
 
-		testKey = "etcd-key-" + guid
-		testValue = "etcd-value-" + guid
-
-		manifest, err = helpers.DeployEtcdWithInstanceCount(1, client, config)
-		Expect(err).NotTo(HaveOccurred())
-
-		Eventually(func() ([]bosh.VM, error) {
-			return client.DeploymentVMs(manifest.Name)
-		}, "1m", "10s").Should(ConsistOf([]bosh.VM{
-			{"running"},
-		}))
-
-	})
-
-	AfterEach(func() {
-		if !CurrentGinkgoTestDescription().Failed {
-			err := client.DeleteDeployment(manifest.Name)
-			Expect(err).NotTo(HaveOccurred())
-		}
-	})
-
-	It("scales from 1 to 3 nodes", func() {
-		var keyVals map[string]string
-
-		By("setting a persistent value", func() {
-			etcdClient := helpers.NewEtcdClient([]string{
-				fmt.Sprintf("http://%s:4001", manifest.Properties.Etcd.Machines[0]),
-			})
-
-			err := etcdClient.Set(testKey, testValue)
-			Expect(err).ToNot(HaveOccurred())
-		})
-
-		By("scaling up to 3 nodes", func() {
-			manifest.Jobs[0], manifest.Properties = destiny.SetJobInstanceCount(manifest.Jobs[0], manifest.Networks[0], manifest.Properties, 3)
-
-			members := manifest.EtcdMembers()
-			Expect(members).To(HaveLen(3))
-
-			yaml, err := manifest.ToYAML()
+		BeforeEach(func() {
+			guid, err := helpers.NewGUID()
 			Expect(err).NotTo(HaveOccurred())
 
-			var wg sync.WaitGroup
-			done := make(chan struct{})
+			testKey = "etcd-key-" + guid
+			testValue = "etcd-value-" + guid
 
-			keysChan := helpers.SpamEtcd(done, &wg, manifest.Properties.Etcd.Machines)
-
-			_, err = client.Deploy(yaml)
+			manifest, err = helpers.DeployEtcdWithInstanceCount(1, client, config, enableSSL)
 			Expect(err).NotTo(HaveOccurred())
 
 			Eventually(func() ([]bosh.VM, error) {
 				return client.DeploymentVMs(manifest.Name)
-			}, "1m", "10s").Should(ConsistOf([]bosh.VM{
-				{"running"},
-				{"running"},
-				{"running"},
-			}))
+			}, "1m", "10s").Should(ConsistOf(helpers.GetVMsFromManifest(manifest)))
 
-			close(done)
-			wg.Wait()
-			keyVals = <-keysChan
-
-			if err, ok := keyVals["error"]; ok {
-				Fail(err)
-			}
-
+			etcdClient = etcdclient.NewClient(fmt.Sprintf("http://%s:6769", manifest.Jobs[2].Networks[0].StaticIPs[0]))
 		})
 
-		By("reading the value from each etcd node in the cluster", func() {
-			for _, machine := range manifest.Properties.Etcd.Machines {
-				etcdClient := helpers.NewEtcdClient([]string{fmt.Sprintf("http://%s:4001", machine)})
+		AfterEach(func() {
+			if !CurrentGinkgoTestDescription().Failed {
+				err := client.DeleteDeployment(manifest.Name)
+				Expect(err).NotTo(HaveOccurred())
+			}
+		})
 
+		It("scales from 1 to 3 nodes", func() {
+			By("setting a persistent value", func() {
+				err := etcdClient.Set(testKey, testValue)
+				Expect(err).ToNot(HaveOccurred())
+			})
+
+			By("scaling up to 3 nodes", func() {
+				var err error
+				manifest, err = helpers.SetEtcdInstanceCount(3, manifest)
+
+				members := manifest.EtcdMembers()
+				Expect(members).To(HaveLen(3))
+
+				yaml, err := manifest.ToYAML()
+				Expect(err).NotTo(HaveOccurred())
+
+				_, err = client.Deploy(yaml)
+				Expect(err).NotTo(HaveOccurred())
+
+				Eventually(func() ([]bosh.VM, error) {
+					return client.DeploymentVMs(manifest.Name)
+				}, "1m", "10s").Should(ConsistOf(helpers.GetVMsFromManifest(manifest)))
+			})
+
+			By("reading the value from each etcd node in the cluster", func() {
 				value, err := etcdClient.Get(testKey)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(value).To(Equal(testValue))
-			}
-
-			for _, machine := range manifest.Properties.Etcd.Machines {
-				etcdClient := helpers.NewEtcdClient([]string{fmt.Sprintf("http://%s:4001", machine)})
-
-				for k, v := range keyVals {
-					value, err := etcdClient.Get(k)
-					Expect(err).ToNot(HaveOccurred())
-					Expect(value).To(Equal(v))
-				}
-			}
+			})
 		})
+	}
 
+	Context("without TLS", func() {
+		ScaleUpInstances(false)
+	})
+
+	Context("with TLS", func() {
+		ScaleUpInstances(true)
 	})
 })

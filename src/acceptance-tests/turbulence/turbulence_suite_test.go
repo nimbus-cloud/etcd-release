@@ -2,13 +2,16 @@ package turbulence_test
 
 import (
 	"acceptance-tests/testing/helpers"
+	"errors"
+	"fmt"
 	"time"
 
+	ginkgoConfig "github.com/onsi/ginkgo/config"
 	"github.com/pivotal-cf-experimental/bosh-test/bosh"
-	"github.com/pivotal-cf-experimental/bosh-test/turbulence"
-	"github.com/pivotal-cf-experimental/destiny"
-
-	"fmt"
+	turbulenceclient "github.com/pivotal-cf-experimental/bosh-test/turbulence"
+	"github.com/pivotal-cf-experimental/destiny/core"
+	"github.com/pivotal-cf-experimental/destiny/iaas"
+	"github.com/pivotal-cf-experimental/destiny/turbulence"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -22,11 +25,11 @@ func TestTurbulence(t *testing.T) {
 }
 
 var (
-	config helpers.Config
-	client bosh.Client
+	config     helpers.Config
+	boshClient bosh.Client
 
-	turbulenceManifest destiny.Manifest
-	turbulenceClient   turbulence.Client
+	turbulenceManifest turbulence.Manifest
+	turbulenceClient   turbulenceclient.Client
 )
 
 var _ = BeforeSuite(func() {
@@ -36,7 +39,7 @@ var _ = BeforeSuite(func() {
 	config, err = helpers.LoadConfig(configPath)
 	Expect(err).NotTo(HaveOccurred())
 
-	client = bosh.NewClient(bosh.Config{
+	boshClient = bosh.NewClient(bosh.Config{
 		URL:              fmt.Sprintf("https://%s:25555", config.BOSH.Target),
 		Username:         config.BOSH.Username,
 		Password:         config.BOSH.Password,
@@ -44,16 +47,16 @@ var _ = BeforeSuite(func() {
 	})
 
 	By("deploying turbulence", func() {
-		info, err := client.Info()
+		info, err := boshClient.Info()
 		Expect(err).NotTo(HaveOccurred())
 
 		guid, err := helpers.NewGUID()
 		Expect(err).NotTo(HaveOccurred())
 
-		manifestConfig := destiny.Config{
+		manifestConfig := turbulence.Config{
 			DirectorUUID: info.UUID,
 			Name:         "turbulence-etcd-" + guid,
-			BOSH: destiny.ConfigBOSH{
+			BOSH: turbulence.ConfigBOSH{
 				Target:         config.BOSH.Target,
 				Username:       config.BOSH.Username,
 				Password:       config.BOSH.Password,
@@ -61,54 +64,62 @@ var _ = BeforeSuite(func() {
 			},
 		}
 
+		var iaasConfig iaas.Config
 		switch info.CPI {
 		case "aws_cpi":
-			manifestConfig.IAAS = destiny.AWS
-
-			if config.AWS.Subnet == "" {
-				Fail("aws.subnet is required for AWS IAAS deployment")
-			}
-
 			manifestConfig.IPRange = "10.0.16.0/24"
-			manifestConfig.AWS = destiny.ConfigAWS{
+			awsConfig := iaas.AWSConfig{
 				AccessKeyID:           config.AWS.AccessKeyID,
 				SecretAccessKey:       config.AWS.SecretAccessKey,
 				DefaultKeyName:        config.AWS.DefaultKeyName,
 				DefaultSecurityGroups: config.AWS.DefaultSecurityGroups,
 				Region:                config.AWS.Region,
-				Subnet:                config.AWS.Subnet,
+				RegistryHost:          config.Registry.Host,
+				RegistryPassword:      config.Registry.Password,
+				RegistryPort:          config.Registry.Port,
+				RegistryUsername:      config.Registry.Username,
 			}
-			manifestConfig.Registry = destiny.ConfigRegistry{
-				Host:     config.Registry.Host,
-				Port:     config.Registry.Port,
-				Username: config.Registry.Username,
-				Password: config.Registry.Password,
+			if config.AWS.Subnet == "" {
+				err = errors.New("AWSSubnet is required for AWS IAAS deployment")
+				return
 			}
+			var cidrBlock string
+			cidrPool := core.NewCIDRPool("10.0.16.0", 24, 27)
+			cidrBlock, err = cidrPool.Get(ginkgoConfig.GinkgoConfig.ParallelNode)
+			if err != nil {
+				return
+			}
+
+			manifestConfig.IPRange = cidrBlock
+			awsConfig.Subnets = []iaas.AWSConfigSubnet{{ID: config.AWS.Subnet, Range: cidrBlock, AZ: "us-east-1a"}}
+
+			iaasConfig = awsConfig
 		case "warden_cpi":
-			manifestConfig.IAAS = destiny.Warden
+			iaasConfig = iaas.NewWardenConfig()
 			manifestConfig.IPRange = "10.244.16.0/24"
 		default:
 			Fail("unknown infrastructure type")
 		}
 
-		turbulenceManifest = destiny.NewTurbulence(manifestConfig)
+		turbulenceManifest, err = turbulence.NewManifest(manifestConfig, iaasConfig)
+		Expect(err).NotTo(HaveOccurred())
 
 		yaml, err := turbulenceManifest.ToYAML()
 		Expect(err).NotTo(HaveOccurred())
 
-		yaml, err = client.ResolveManifestVersions(yaml)
+		yaml, err = boshClient.ResolveManifestVersions(yaml)
 		Expect(err).NotTo(HaveOccurred())
 
-		turbulenceManifest, err = destiny.FromYAML(yaml)
+		turbulenceManifest, err = turbulence.FromYAML(yaml)
 		Expect(err).NotTo(HaveOccurred())
 
-		_, err = client.Deploy(yaml)
+		_, err = boshClient.Deploy(yaml)
 		Expect(err).NotTo(HaveOccurred())
 
 		Eventually(func() ([]bosh.VM, error) {
-			return client.DeploymentVMs(turbulenceManifest.Name)
+			return boshClient.DeploymentVMs(turbulenceManifest.Name)
 		}, "1m", "10s").Should(ConsistOf([]bosh.VM{
-			{"running"},
+			{Index: 0, JobName: "api", State: "running"},
 		}))
 	})
 
@@ -117,14 +128,14 @@ var _ = BeforeSuite(func() {
 			turbulenceManifest.Properties.TurbulenceAPI.Password,
 			turbulenceManifest.Jobs[0].Networks[0].StaticIPs[0])
 
-		turbulenceClient = turbulence.NewClient(turbulenceUrl, 5*time.Minute, 2*time.Second)
+		turbulenceClient = turbulenceclient.NewClient(turbulenceUrl, 5*time.Minute, 2*time.Second)
 	})
 })
 
 var _ = AfterSuite(func() {
 	By("deleting the turbulence deployment", func() {
 		if !CurrentGinkgoTestDescription().Failed {
-			err := client.DeleteDeployment(turbulenceManifest.Name)
+			err := boshClient.DeleteDeployment(turbulenceManifest.Name)
 			Expect(err).NotTo(HaveOccurred())
 		}
 	})
