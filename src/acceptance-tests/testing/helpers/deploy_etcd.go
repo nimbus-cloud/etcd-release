@@ -4,175 +4,97 @@ import (
 	"errors"
 	"fmt"
 
-	ginkgoConfig "github.com/onsi/ginkgo/config"
 	"github.com/pivotal-cf-experimental/bosh-test/bosh"
-	"github.com/pivotal-cf-experimental/destiny/core"
-	"github.com/pivotal-cf-experimental/destiny/etcd"
-	"github.com/pivotal-cf-experimental/destiny/iaas"
+	"github.com/pivotal-cf-experimental/destiny/etcdwithops"
+	"github.com/pivotal-cf-experimental/destiny/ops"
 )
 
-func ResolveVersionsAndDeploy(manifest etcd.Manifest, client bosh.Client) (err error) {
-	yaml, err := manifest.ToYAML()
+func NewEtcdManifestWithInstanceCountAndReleaseVersion(deploymentPrefix string, instanceCount int, enableSSL bool, boshClient bosh.Client, releaseVersion string) (string, error) {
+	manifestName := fmt.Sprintf("etcd-%s", deploymentPrefix)
+
+	//TODO: AZs should be pulled from integration_config
+	var (
+		manifest string
+		err      error
+	)
+	manifest, err = etcdwithops.NewManifestV2(etcdwithops.ConfigV2{
+		Name:      manifestName,
+		AZs:       []string{"z1", "z2"},
+		EnableSSL: enableSSL,
+	})
+
 	if err != nil {
-		return
+		return "", err
 	}
 
-	yaml, err = client.ResolveManifestVersions(yaml)
+	manifest, err = ops.ApplyOp(manifest, ops.Op{
+		Type:  "replace",
+		Path:  "/releases/name=etcd/version",
+		Value: releaseVersion,
+	})
 	if err != nil {
-		return
+		return "", err
 	}
 
-	manifest, err = etcd.FromYAML(yaml)
+	manifest, err = ops.ApplyOp(manifest, ops.Op{
+		Type:  "replace",
+		Path:  "/instance_groups/name=etcd/instances",
+		Value: instanceCount,
+	})
 	if err != nil {
-		return
+		return "", err
 	}
 
-	_, err = client.Deploy(yaml)
+	manifestYAML, err := boshClient.ResolveManifestVersionsV2([]byte(manifest))
 	if err != nil {
-		return
+		return "", err
 	}
 
-	return
+	return string(manifestYAML), nil
 }
 
-func buildManifestInputs(config Config, client bosh.Client) (manifestConfig etcd.Config, iaasConfig iaas.Config, err error) {
-	guid, err := NewGUID()
-	if err != nil {
-		return
-	}
-
-	info, err := client.Info()
-	if err != nil {
-		return
-	}
-
-	manifestConfig = etcd.Config{
-		DirectorUUID: info.UUID,
-		Name:         fmt.Sprintf("etcd-%s", guid),
-	}
-
-	switch info.CPI {
-	case "aws_cpi":
-		awsConfig := iaas.AWSConfig{
-			AccessKeyID:           config.AWS.AccessKeyID,
-			SecretAccessKey:       config.AWS.SecretAccessKey,
-			DefaultKeyName:        config.AWS.DefaultKeyName,
-			DefaultSecurityGroups: config.AWS.DefaultSecurityGroups,
-			Region:                config.AWS.Region,
-			RegistryHost:          config.Registry.Host,
-			RegistryPassword:      config.Registry.Password,
-			RegistryPort:          config.Registry.Port,
-			RegistryUsername:      config.Registry.Username,
-		}
-		if config.AWS.Subnet == "" {
-			err = errors.New("AWSSubnet is required for AWS IAAS deployment")
-			return
-		}
-		var cidrBlock string
-		cidrPool := core.NewCIDRPool("10.0.16.0", 24, 27)
-		cidrBlock, err = cidrPool.Get(ginkgoConfig.GinkgoConfig.ParallelNode)
-		if err != nil {
-			return
-		}
-
-		manifestConfig.IPRange = cidrBlock
-		awsConfig.Subnets = []iaas.AWSConfigSubnet{{ID: config.AWS.Subnet, Range: cidrBlock, AZ: "us-east-1a"}}
-
-		iaasConfig = awsConfig
-	case "warden_cpi":
-		iaasConfig = iaas.NewWardenConfig()
-
-		var cidrBlock string
-		cidrPool := core.NewCIDRPool("10.244.16.0", 24, 27)
-		cidrBlock, err = cidrPool.Get(ginkgoConfig.GinkgoConfig.ParallelNode)
-		if err != nil {
-			return
-		}
-		manifestConfig.IPRange = cidrBlock
-	default:
-		err = errors.New("unknown infrastructure type")
-	}
-
-	return
+func NewEtcdManifestWithInstanceCount(deploymentPrefix string, instanceCount int, enableSSL bool, boshClient bosh.Client) (string, error) {
+	return NewEtcdManifestWithInstanceCountAndReleaseVersion(deploymentPrefix, instanceCount, enableSSL, boshClient, EtcdDevReleaseVersion())
 }
 
-func DeployEtcdWithInstanceCount(count int, client bosh.Client, config Config, enableSSL bool) (manifest etcd.Manifest, err error) {
-	manifest, err = NewEtcdWithInstanceCount(count, client, config, enableSSL)
+func DeployEtcdWithInstanceCountAndReleaseVersion(deploymentPrefix string, instanceCount int, enableSSL bool, boshClient bosh.Client, releaseVersion string) (string, error) {
+	manifest, err := NewEtcdManifestWithInstanceCountAndReleaseVersion(deploymentPrefix, instanceCount, enableSSL, boshClient, releaseVersion)
 	if err != nil {
-		return
+		return "", err
 	}
 
-	err = ResolveVersionsAndDeploy(manifest, client)
-	return
-}
-
-func NewEtcdWithInstanceCount(count int, client bosh.Client, config Config, enableSSL bool) (manifest etcd.Manifest, err error) {
-	manifestConfig, iaasConfig, err := buildManifestInputs(config, client)
+	_, err = boshClient.Deploy([]byte(manifest))
 	if err != nil {
-		return
-	}
-
-	if enableSSL {
-		manifest, err = etcd.NewTLSManifest(manifestConfig, iaasConfig)
-		if err != nil {
-			return
-		}
-	} else {
-		manifest, err = etcd.NewManifest(manifestConfig, iaasConfig)
-		if err != nil {
-			return
-		}
-	}
-
-	manifest, err = SetEtcdInstanceCount(3, manifest)
-
-	return
-}
-
-func SetEtcdInstanceCount(count int, manifest etcd.Manifest) (etcd.Manifest, error) {
-	var err error
-	manifest.Jobs[1], err = etcd.SetJobInstanceCount(manifest.Jobs[1], manifest.Networks[0], count, 0)
-	if err != nil {
-		return manifest, err
-	}
-	manifest.Properties = etcd.SetEtcdProperties(manifest.Jobs[1], manifest.Properties)
-
-	return manifest, nil
-}
-
-func SetTestConsumerInstanceCount(count int, manifest etcd.Manifest) (etcd.Manifest, error) {
-	jobIndex, err := FindJobIndexByName(manifest, "testconsumer_z1")
-	if err != nil {
-		return manifest, err
-	}
-
-	manifest.Jobs[jobIndex], err = etcd.SetJobInstanceCount(manifest.Jobs[jobIndex], manifest.Networks[0], count, 8)
-	if err != nil {
-		return manifest, err
+		return "", err
 	}
 
 	return manifest, nil
 }
 
-func NewEtcdManifestWithTLSUpgrade(manifestName string, client bosh.Client, config Config) (manifest etcd.Manifest, err error) {
-	manifestConfig, iaasConfig, err := buildManifestInputs(config, client)
+func DeployEtcdWithInstanceCount(deploymentPrefix string, instanceCount int, enableSSL bool, boshClient bosh.Client) (string, error) {
+	return DeployEtcdWithInstanceCountAndReleaseVersion(deploymentPrefix, instanceCount, enableSSL, boshClient, EtcdDevReleaseVersion())
+}
+
+func VerifyDeploymentRelease(client bosh.Client, deploymentName string, releaseVersion string) (err error) {
+	deployments, err := client.Deployments()
 	if err != nil {
 		return
 	}
 
-	manifest = etcd.NewTLSUpgradeManifest(manifestConfig, iaasConfig)
-	if manifestName != "" {
-		manifest.Name = manifestName
+	for _, deployment := range deployments {
+		if deployment.Name == deploymentName {
+			for _, release := range deployment.Releases {
+				if release.Name == "etcd" {
+					switch {
+					case len(release.Versions) > 1:
+						err = errors.New("too many releases")
+					case len(release.Versions) == 1 && release.Versions[0] != releaseVersion:
+						err = fmt.Errorf("expected etcd-release version %q but got %q", releaseVersion, release.Versions[0])
+					}
+				}
+			}
+		}
 	}
 
 	return
-}
-
-func FindJobIndexByName(manifest etcd.Manifest, jobName string) (int, error) {
-	for i, job := range manifest.Jobs {
-		if job.Name == jobName {
-			return i, nil
-		}
-	}
-	return -1, errors.New("job not found")
 }

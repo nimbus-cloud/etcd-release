@@ -8,8 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 
-	"acceptance-tests/testing/etcd"
-
+	"github.com/cloudfoundry-incubator/etcd-release/src/acceptance-tests/testing/etcd"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
@@ -144,6 +143,63 @@ var _ = Describe("etcd", func() {
 
 				err := client.Set("some-key", "some-value")
 				Expect(err).To(MatchError("bad things happened"))
+			})
+		})
+	})
+
+	Describe("Leader", func() {
+		It("returns the name of the cluster leader", func() {
+			testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == "GET" && r.URL.Path == "/leader" {
+					w.WriteHeader(http.StatusOK)
+					w.Write([]byte("etcd-z1-2"))
+					return
+				}
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+
+			client := etcd.NewClient(testServer.URL)
+
+			leaderName, err := client.Leader()
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(leaderName).To(Equal("etcd-z1-2"))
+		})
+
+		Context("failure cases", func() {
+			It("returns an error when the request fails", func() {
+				client := etcd.NewClient("%%%%%%")
+
+				_, err := client.Leader()
+				Expect(err.(*url.Error).Op).To(Equal("parse"))
+			})
+
+			It("returns an error when a bad read occurs", func() {
+				testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+					w.Write([]byte("some-value"))
+				}))
+
+				etcd.SetBodyReader(func(io.Reader) ([]byte, error) {
+					return []byte{}, errors.New("bad things happened")
+				})
+
+				client := etcd.NewClient(testServer.URL)
+
+				_, err := client.Leader()
+				Expect(err).To(MatchError("bad things happened"))
+			})
+
+			It("returns an error when the response is not 200", func() {
+				testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusInternalServerError)
+					w.Write([]byte("something bad happened"))
+				}))
+
+				client := etcd.NewClient(testServer.URL)
+
+				_, err := client.Leader()
+				Expect(err).To(MatchError("unexpected status: 500 Internal Server Error something bad happened"))
 			})
 		})
 	})

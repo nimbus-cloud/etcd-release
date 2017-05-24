@@ -1,19 +1,18 @@
 # etcd-release
----
 
 This is a [BOSH](http://bosh.io) release for [etcd](https://github.com/coreos/etcd).
 
-* [CI](https://mega.ci.cf-app.com/pipelines/etcd)
+* [CI](https://p-concourse.wings.cf-app.com/teams/system-team-infra-infra1-08f1/pipelines/etcd?groups=etcd)
 * [Roadmap](https://www.pivotaltracker.com/n/projects/1382120)
 
-###Contents
+### Contents
 
 * [Using Etcd](#using-etcd)
 * [Deploying](#deploying)
 * [Contributing](#contributing)
 * [Running Tests](#running-tests)
 * [Encryption](#encryption)
-* [Disaster Recovery](#disaster-recovery)
+* [Failure Recovery](#failure-recovery)
 
 ## Using Etcd
 
@@ -51,20 +50,23 @@ In order to deploy etcd-release you must follow the standard steps for deploying
 
 We assume you have already deployed and targeted a BOSH director. For more instructions on how to do that please see the [BOSH documentation](http://bosh.io/docs).
 
-###1. Uploading a stemcell
+### 1. Uploading a stemcell
 Find the "BOSH Lite Warden" stemcell you wish to use. [bosh.io](https://bosh.io/stemcells) provides a resource to find and download stemcells.  Then run `bosh upload stemcell STEMCELL_URL_OR_PATH_TO_DOWNLOADED_STEMCELL`.
 
-###2. Creating a release
-From within the etcd-release director run `bosh create release --force` to create a development release.
+### 2. Creating a release
 
-###3. Uploading a release
+Run `git submodule --init --recursive` to clone all submodules within `etcd-release` if you have done so already.
+
+From within the etcd-release directory run `bosh create release --force` to create a development release.
+
+### 3. Uploading a release
 Once you've created a development release run `bosh upload release` to upload your development release to the director.
 
 ### 4. Using a sample deployment manifest
 
 We provide a set of sample deployment manifests that can be used as a starting point for creating your own manifest, but they should not be considered comprehensive. They are located in manifests/aws and manifests/bosh-lite.
 
-###5. Deploy
+### 5. Deploy
 
 Run `bosh -d OUTPUT_MANIFEST_PATH deploy`.
 
@@ -123,6 +125,22 @@ The full set of config parameters is explained below:
 * `registry.port` Port for the BOSH registry
 * `registry.username` Username for the BOSH registry
 * `registry.password` Password for the BOSH registry
+
+### Running acceptance tests as an errand
+
+The acceptance tests can also be run as a bosh errand. An example manifest is included to run against bosh-lite.
+
+```
+bosh upload stemcell https://bosh.io/d/stemcells/bosh-warden-boshlite-ubuntu-trusty-go_agent --skip-if-exists
+bosh upload release https://bosh.io/d/github.com/cloudfoundry-incubator/consul-release
+bosh upload release https://bosh.io/d/github.com/cppforlife/bosh-warden-cpi-release
+bosh upload release https://bosh.io/d/github.com/cppforlife/turbulence-release
+bosh create release --force
+bosh upload release
+bosh update cloud-config manifests/bosh-lite/cloud-config.yml
+bosh -n -d manifests/bosh-lite/eats.yml deploy
+bosh -d manifests/bosh-lite/eats.yml run errand acceptance-tests
+```
 
 ## Encryption
 
@@ -237,8 +255,21 @@ The server certificate must have the common name `etcd.service.consul` and
 must specify `etcd.service.consul` and `*.etcd.service.consul` as Subject
 Alternative Names (SANs).
 
-## Disaster Recovery
+## Failure Recovery
 
+### TLS Certificate Issues
+
+A common source of failure is TLS certification configuration.  If you have a failed
+deploy and see errors related to certificates, authorities, "crypto", etc. it's a good
+idea to confirm that:
+
+* all etcd-related certificates and keys in your manifest are correctly PEM-encoded;
+* certificates match their corresponding keys;
+* certificates have been signed by the appropriate CA certificate; and
+* the YAML syntax of your manifest is correct.
+
+### Failed Deploys, Upgrades, Split-Brain Scenarios, etc.
+ 
 In the event that the etcd cluster ends up in a bad state that is difficult
 to debug, you have the option of stopping etcd on each node, removing its
 data store, and then restarting the process:
@@ -252,4 +283,11 @@ monit start etcd (one-by-one on each node in etcd cluster)
 There are often more graceful ways to solve specific issues, but it is hard
 to document all of the possible failure modes and recovery steps. As long as
 your etcd cluster does not contain critical data that cannot be repopulated,
-this option is safe and will probably get you unstuck.
+this option is safe and will probably get you unstuck. If you are debugging
+an etcd server cluster in the context of a Cloud Foundry and/or Diego
+deployment, it should be safe to follow the above steps.
+
+CAVEAT: There is currently a known issue with the new TCP Routing feature in
+Cloud Foundry where the Routing API stores non-ephemeral data pertaining to
+Router Groups in etcd.  At the time of this writing, there is work in progress
+for the Routing API to store such data outside of etcd.
