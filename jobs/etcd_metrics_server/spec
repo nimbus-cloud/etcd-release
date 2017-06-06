@@ -60,3 +60,6 @@ properties:
   etcd_metrics_server.etcd.require_ssl:
     description: "enable ssl for all communication with etcd"
     default: false
+
+  diego.zone:
+    description: "Site (datacenter name), used for node name uniqness"

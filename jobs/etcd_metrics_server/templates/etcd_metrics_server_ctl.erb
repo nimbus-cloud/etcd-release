@@ -21,7 +21,7 @@ function setup() {
 
 function start_etcd_metrics_server() {
   local node_name
-  node_name="<%= name.gsub('_', '-') %>-<%= spec.index %>"
+  node_name="<%= name.gsub('_', '-') %>-<%= p("diego.zone") %>-<%= spec.index %>"
 
   /var/vcap/packages/etcd_metrics_server/bin/etcd-metrics-server \
       -index=<%= spec.index %> \
